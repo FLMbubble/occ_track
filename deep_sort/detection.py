@@ -73,7 +73,8 @@ class DetectionOcc(object):
 
     """
 
-    def __init__(self, xy, cls,confidence,v_xy,feature,timestamp):
+    def __init__(self, det_id,xy, cls,confidence,v_xy,feature,timestamp):
+        self.det_id=det_id
         self.xy = np.asarray(xy, dtype=np.float32)
         self.cls=cls
         self.confidence = float(confidence)

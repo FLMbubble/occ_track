@@ -1,6 +1,6 @@
 # vim: expandtab:ts=4:sw=4
 
-
+import numpy as np
 class TrackState:
     """
     Enumeration type for the single target track state. Newly created tracks are
@@ -213,14 +213,15 @@ class TrackOcc:
 
     """
 
-    def __init__(self, mean, covariance, track_id, n_init, max_age,
-                 feature=None):
+    def __init__(self, mean, covariance, track_id, n_init, max_age,track_cls,
+                 feature=None,occ_size=0.4,occ_range=[-40,-40,40,40]):
         self.mean = mean
         self.covariance = covariance
         self.track_id = track_id
         self.hits = 1
         self.age = 1
         self.time_since_update = 0
+        self.track_cls=track_cls
 
         self.state = TrackState.Tentative
         self.features = []
@@ -229,6 +230,10 @@ class TrackOcc:
 
         self._n_init = n_init
         self._max_age = max_age
+        self.occ_size=occ_size
+        self.occ_range=np.array(occ_range)
+        self.pred=mean
+        self.before_align=mean
 
     # def to_tlwh(self):
     #     """Get current position in bounding box format `(top left x, top left y,
@@ -257,6 +262,18 @@ class TrackOcc:
         ret = self.mean[:2].copy()
         return ret
     
+    def to_xycls(self):
+        """Get current position `(center x, center y)` and cls.
+
+        Returns
+        -------
+        ndarray
+            The bounding box.
+
+        """
+        ret_xy = np.round(self.mean[:2]).astype(np.int16).tolist()
+        return ret_xy+[int(self.track_cls)]
+    
 
     # def to_tlbr(self):
     #     """Get current position in bounding box format `(min x, miny, max x,
@@ -271,8 +288,28 @@ class TrackOcc:
     #     ret = self.to_tlwh()
     #     ret[2:] = ret[:2] + ret[2:]
     #     return ret
+    def align(self,prev_to_cur_rt):
+        """Align the current track with the previous track using the given
+        rotation matrix.
 
-    def predict(self, kf):
+        Parameters
+        ----------
+        prev_to_cur_rt : ndarray
+            The rotation matrix to align the current track with the previous
+            track.
+
+        """
+        self.before_align=self.mean[:2].copy()
+        rot=prev_to_cur_rt[:2,:2]
+        trans=prev_to_cur_rt[:2,2]
+
+        ego_xy_prev=self.mean[:2]*self.occ_size+self.occ_range[:2]
+        ego_xy_cur = np.dot(rot, ego_xy_prev)+trans
+        self.mean[:2] = (ego_xy_cur-self.occ_range[:2])/self.occ_size
+
+        # self.covariance[:2, :2] = np.dot(rot, np.dot(self.covariance[:2, :2], rot.T))
+
+    def predict(self, kf,dt):
         """Propagate the state distribution to the current time step using a
         Kalman filter prediction step.
 
@@ -282,11 +319,14 @@ class TrackOcc:
             The Kalman filter.
 
         state variable:cx,cy,vx,vy
+        results in current time ego coordinate
         """
 
-        self.mean, self.covariance = kf.predict(self.mean, self.covariance)
+        self.mean, self.covariance = kf.predict(self.mean, self.covariance,dt)
         self.age += 1
         self.time_since_update += 1
+        self.pred=self.mean[:2].copy()
+        
 
     def update(self, kf, detection):
         """Perform Kalman filter measurement update step and update the feature
