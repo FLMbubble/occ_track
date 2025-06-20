@@ -11,7 +11,7 @@ from application_util import preprocessing
 from application_util import visualization
 from deep_sort import nn_matching
 from deep_sort.detection import Detection,DetectionOcc
-from deep_sort.tracker import Tracker,TrackerOcc
+from deep_sort.tracker import Tracker,TrackerOcc,TrackerOccEgo
 
 
 def sort_files(detection_batch_dir,sort_out_dir='./detections/MY_PANOOCC'):
@@ -33,7 +33,7 @@ def sort_files(detection_batch_dir,sort_out_dir='./detections/MY_PANOOCC'):
 
 
             
-        
+
         inst_num=detection_data['inst_xyz'].shape[0]
         single_info=np.zeros((inst_num,72),dtype=np.float32)-1#frame_id,id,cx,cy,cls,conf,vx,vy,feat_64
         time_info=np.zeros((inst_num),dtype=np.float64)+detection_data['timestamp']
@@ -145,7 +145,7 @@ def gather_sequence_info(detection_file,timestamp_file,bev_size=(200,200)):
     return seq_info
 
 
-def create_detections(detection_mat, timestamps,frame_idx,min_height=0):
+def create_detections(detection_mat, timestamps,frame_idx,min_height=0,occ_size=0.4,occ_range=[-40,-40,40,40]):
     """Create detections for given frame index from the raw detection matrix.
 
     Parameters
@@ -174,8 +174,9 @@ def create_detections(detection_mat, timestamps,frame_idx,min_height=0):
     timestamp_list = timestamps[mask]
     for row in detection_mat[mask]:
         # bbox, confidence, feature = row[2:6], row[6], row[10:]
-        det_id,xy, cls,confidence, v_xy,feature = row[1],row[2:4], row[4],row[5],row[6:8], row[8:]
 
+        det_id,xy, cls,confidence, v_xy,feature = row[1],row[2:4], row[4],row[5],row[6:8], row[8:]
+        xy=(xy+0.5)*occ_size+np.array(occ_range)[:2]
         detection_list.append(DetectionOcc(det_id,xy, cls,confidence,v_xy,feature,timestamp_list[0]))
     return detection_list
 
@@ -219,7 +220,7 @@ def run(detection_file, timestamp_file,aux_file,ori_dir,output_file, min_confide
     metric_cos = nn_matching.NearestNeighborDistanceMetric(
         "cosine", max_cosine_distance, nn_budget)
     metric_geo=1
-    tracker = TrackerOcc(metric_cos,metric_geo,occ_size=occ_size)
+    tracker = TrackerOccEgo(metric_cos,metric_geo,occ_size=occ_size,occ_range=occ_range)
     results = []
     init_flag=False
     cur_timestamp=0
@@ -232,10 +233,12 @@ def run(detection_file, timestamp_file,aux_file,ori_dir,output_file, min_confide
         nonlocal cur_timestamp
         nonlocal aux_data
         nonlocal min_confidence
+        nonlocal occ_size
+        nonlocal occ_range
         file_n=aux_data[str(frame_idx)].item()
         # Load image and generate detections.
         detections = create_detections(
-            seq_info["detections"], seq_info["timestamp"],frame_idx)
+            seq_info["detections"], seq_info["timestamp"],frame_idx,occ_size=occ_size, occ_range=occ_range)
 
         detections = [d for d in detections if d.confidence >= min_confidence]
         
@@ -246,6 +249,9 @@ def run(detection_file, timestamp_file,aux_file,ori_dir,output_file, min_confide
         # print("min_confidence:{}\tcheck scores:{}".format(min_confidence,scores))
         if len(detections)==0:
             return
+        elif len(detections)>2:
+            print('wrong idx:{}'.format(frame_idx))
+            print("centers:{}".format(centers))
         if not init_flag:
             init_flag=True
             cur_timestamp=detections[0].timestamp
@@ -291,19 +297,30 @@ def run(detection_file, timestamp_file,aux_file,ori_dir,output_file, min_confide
                 track_match=m[0]
 
                 frame_match_info.append([track_match.track_id,track_match.pred[0],track_match.pred[1],track_match.track_cls,det_match.det_id,det_match.xy[0],det_match.xy[1],det_match.cls])
-                print("match save:{}\t{}\t cur_det:{}".format(track_match.track_id,det_match.det_id,len(detections)))
+                # print("match save:{}\t{}\t cur_det:{}".format(track_match.track_id,det_match.det_id,len(detections)))
             np.save(os.path.join('detections/track_det',file_n.replace('.npz','.npy')),np.asarray(frame_match_info))
             # print("track match:{}".format(info))
             track_info=[]
             for track in tracker.tracks:
                 # track_info.append([track.track_id,track.pred[0],track.pred[1],track.track_cls])
                 # track_info.append([track.track_id,track.before_align[0],track.before_align[1],track.track_cls])
-                track_info.append([track.track_id,track.mean[0],track.mean[1],track.track_cls])
+                track_mean=np.round((track.mean[:2]-np.array(occ_range)[:2])/occ_size-0.5).astype(np.int16)
+                track_info.append([track.track_id,track_mean[0],track_mean[1],track.track_cls])
             det_info=[]
             for det in detections:
-                det_info.append([det.det_id,det.xy[0],det.xy[1],det.cls])
+                det_xy=np.round((det.xy-np.array(occ_range)[:2])/occ_size-0.5).astype(np.int16)
+                det_info.append([det.det_id,det_xy[0],det_xy[1],det.cls])
             np.save(os.path.join('detections/track_mid',file_n.replace('.npz','track.npy')),np.asarray(track_info))
             np.save(os.path.join('detections/track_mid',file_n.replace('.npz','det.npy')),np.asarray(det_info))
+        else:
+            print("frame wrong:{}".format(frame_idx))
+            for track in tracker.tracks:
+                track_mean=np.round((track.mean[:2]-np.array(occ_range)[:2])/occ_size-0.5).astype(np.int16)
+                print("Exist track:",track_mean)
+            for det in detections:
+                det_xy=np.round((det.xy-np.array(occ_range)[:2])/occ_size-0.5).astype(np.int16)
+                print("Exist det:",det_xy)
+            print("-"*50)
 
 
     # Run tracker.
@@ -377,7 +394,7 @@ def parse_args():
         default=0.4, type=float)
     parser.add_argument(
         "--occ_range", help="voxel range:[xmin,ymin,xmax,ymax]",
-        default=[-40,-40,40,40], type=list)
+        default=[-40,-40,40,40], type=str)
     return parser.parse_args()
 
 
@@ -385,8 +402,10 @@ if __name__ == "__main__":
     
     args = parse_args()
     sort_files(args.ori_dir,args.detection_outdir)
+
+    occ_range=list(map(float,args.occ_range.split(',')))
     run(
         args.detection_file, args.timestamp_file,args.aux_file,args.ori_dir,args.output_file,
-        args.min_confidence,args.max_cosine_distance, args.nn_budget, args.display,args.occ_size,args.occ_range)
+        args.min_confidence,args.max_cosine_distance, args.nn_budget, args.display,args.occ_size,occ_range)
 
     
